@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-iquest-q1"
+version = "0.1.0.dev0"
+description = "IQuest-Q1 models and parsers for vLLM"
+readme = "README.md"
+requires-python = ">=3.10,<3.15"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = ["vllm"]
+
+[project.urls]
+Repository = "https://github.com/chenwenxiaolive/vllm-iquest-q1"
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.entry-points."vllm.general_plugins"]
+iquest_q1 = "vllm_iquest_q1:register"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["cpu_test: test that does not require a GPU"]
