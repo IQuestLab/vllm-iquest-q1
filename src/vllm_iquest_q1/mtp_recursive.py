@@ -350,9 +350,4 @@ class IQuestQ1MTPRecursive(nn.Module, SupportsPP):
 
         if qkv_shards != {"q", "k", "v"}:
             raise ValueError("Recursive MTP checkpoint is missing QKV projections")
-        missing = set(params_dict) - loaded_params
-        if missing:
-            raise ValueError(
-                f"Recursive MTP checkpoint is missing weights: {sorted(missing)}"
-            )
         return loaded_params

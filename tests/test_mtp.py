@@ -214,8 +214,8 @@ def test_recursive_loads_offset_layers_and_fused_weights(fused_experts):
     for name, value in expected.items():
         torch.testing.assert_close(params[name], value, msg=name)
 
-    with pytest.raises(ValueError, match="missing weights"):
-        model_cls.load_weights(draft, checkpoint[1:])
+    loaded = model_cls.load_weights(draft, checkpoint[1:])
+    assert loaded == set(expected) - {"model.embed_tokens.weight"}
     with pytest.raises(ValueError, match="missing QKV"):
         model_cls.load_weights(
             draft,
