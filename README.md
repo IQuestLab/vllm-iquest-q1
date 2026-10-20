@@ -75,3 +75,17 @@ vllm serve "$MODEL_ROOT" \
 .venv/bin/python -m pytest tests -q
 uv build --wheel --out-dir dist
 ```
+
+## Publishing
+
+Releases use PyPI Trusted Publishing. Configure the PyPI project
+`vllm-iquest-q1` to trust the GitHub repository `IQuestLab/vllm-iquest-q1`,
+workflow `publish.yml`, and environment `pypi`.
+
+Build and test the wheel before creating a GitHub release. Attach the tested
+wheel and a `SHA256SUMS` file containing its SHA-256 and filename to a draft
+release tagged `v<package-version>`, then publish the release. The tag must
+point to the commit used to build and test the wheel.
+
+The workflow verifies the checksum, package name, and version, then uploads
+the existing wheel to PyPI. It does not rebuild the package.
