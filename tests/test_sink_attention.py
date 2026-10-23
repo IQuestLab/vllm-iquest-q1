@@ -196,6 +196,15 @@ def test_iquest_paged_learned_sink_matches_dense_attention(
             kv_cache,
             torch.arange(9 * block_size, device=device, dtype=torch.int64),
         )
+        cached_key, cached_value = kv_cache.view(fp8_dtype).float().chunk(2, dim=-1)
+        torch.testing.assert_close(
+            torch.cat(
+                [cached_key * layer._k_scale, cached_value * layer._v_scale], dim=-1
+            ),
+            reference_cache,
+            atol=0,
+            rtol=0,
+        )
     output = torch.full(
         (num_tokens + 5, num_q_heads + 1, head_size),
         -73,
@@ -233,11 +242,17 @@ def test_iquest_paged_learned_sink_matches_dense_attention(
         sink_logits = torch.einsum("qhd,hd->hq", q, sink) * scale
         probabilities = torch.cat([logits, sink_logits[..., None]], dim=-1).softmax(-1)
         expected = torch.einsum("hqk,khd->qhd", probabilities[..., :-1], value)
+        if quantized:
+            # Match vLLM's test_attention_backends.py FP8 SDPA tolerances;
+            # FlashAttention also rounds the attention probabilities to FP8.
+            atol, rtol = 6e-2, 1e-1
+        else:
+            atol = rtol = 1e-2 if dtype == torch.bfloat16 else 1e-3
         torch.testing.assert_close(
             output[start : start + query_len].float(),
             expected,
-            atol=1e-2 if dtype == torch.bfloat16 else 1e-3,
-            rtol=1e-2 if dtype == torch.bfloat16 else 1e-3,
+            atol=atol,
+            rtol=rtol,
         )
         start += query_len
     assert torch.all(output[num_tokens:] == -73)
