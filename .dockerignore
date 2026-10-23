@@ -1,0 +1,6 @@
+**
+!Dockerfile
+!dist/
+!dist/vllm_iquest_q1-0.1.1-py3-none-any.whl
+!dist/vllm-0.30.0-cp38-abi3-manylinux_2_28_x86_64.whl
+!dist/humming_kernels-0.1.12-py3-none-manylinux_2_28_x86_64.whl
