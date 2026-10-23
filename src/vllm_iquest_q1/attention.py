@@ -5,7 +5,6 @@
 from typing import Any, ClassVar
 
 import torch
-
 from vllm.config import get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.attention import Attention

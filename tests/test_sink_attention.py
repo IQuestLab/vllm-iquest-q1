@@ -9,7 +9,6 @@ sink key explicitly.
 
 import pytest
 import torch
-
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -109,13 +108,13 @@ def test_iquest_paged_learned_sink_matches_dense_attention(
 
     from types import SimpleNamespace
 
+    from vllm import _custom_ops as ops
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+
     from vllm_iquest_q1.attention import (
         IQuestFlashAttentionBackend,
         IQuestFlashAttentionImpl,
     )
-
-    from vllm import _custom_ops as ops
-    from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 
     set_random_seed(0)
     device = "cuda"
@@ -248,8 +247,6 @@ def test_iquest_paged_learned_sink_matches_dense_attention(
 @torch.inference_mode()
 def test_fp8_attention_layer_quantizes_query_and_applies_sink(cudagraph):
     """Exercise query quantization and cache writes through the real layer API."""
-    from vllm_iquest_q1.attention import IQuestAttention
-
     from vllm.config import (
         CacheConfig,
         CompilationConfig,
@@ -260,6 +257,8 @@ def test_fp8_attention_layer_quantizes_query_and_applies_sink(cudagraph):
     from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.attention.backends.fa_utils import flash_attn_supports_kv_cache_dtype
     from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+
+    from vllm_iquest_q1.attention import IQuestAttention
 
     if not flash_attn_supports_kv_cache_dtype("fp8", head_size=128):
         pytest.skip("FP8 KV cache is unavailable")
