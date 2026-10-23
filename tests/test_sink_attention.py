@@ -191,8 +191,9 @@ def test_iquest_paged_learned_sink_matches_dense_attention(
         kv_cache = torch.empty_like(kv_cache, dtype=torch.uint8)
         impl.do_kv_cache_update(
             layer,
-            key,
-            value,
+            # Cache writes require contiguous head and feature dimensions.
+            key.contiguous(),
+            value.contiguous(),
             kv_cache,
             torch.arange(9 * block_size, device=device, dtype=torch.int64),
         )
