@@ -25,9 +25,11 @@ RUN --mount=type=bind,source=dist,target=/opt/wheels \
     && test -n "$IQUEST_WHEEL_SHA256" \
     && cd /opt/wheels \
     && echo "ef52ee58c410ead0b8afb190838fa4cbcb52075596f67862a03859d984966ac4  vllm-0.30.0-cp38-abi3-manylinux_2_28_x86_64.whl" | sha256sum --check --strict \
+    && echo "cd3ef712a93f3a9075ea99de2c72bcd3ec89dab3759b3a248d869f5507b60331  humming_kernels-0.1.12-py3-none-manylinux_2_28_x86_64.whl" | sha256sum --check --strict \
     && echo "$IQUEST_WHEEL_SHA256  vllm_iquest_q1-0.1.1-py3-none-any.whl" | sha256sum --check --strict \
     && uv pip install --python "$VIRTUAL_ENV/bin/python" --no-index --no-deps --no-cache \
         ./vllm-0.30.0-cp38-abi3-manylinux_2_28_x86_64.whl \
+        ./humming_kernels-0.1.12-py3-none-manylinux_2_28_x86_64.whl \
         ./vllm_iquest_q1-0.1.1-py3-none-any.whl \
     && uv pip check --python "$VIRTUAL_ENV/bin/python"
 

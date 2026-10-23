@@ -85,9 +85,10 @@ trusted publisher; the workflow verifies and uploads the attached wheel without
 rebuilding it.
 
 The Dockerfile reuses the previous CUDA 13.0 runtime by immutable digest. Stage
-the tested plugin wheel and the upstream vLLM 0.30.0 Linux x86-64 wheel in `dist/`.
-The build verifies both hashes and installs these exact files without downloading
-or changing the base image's other dependencies. Supply the plugin wheel's
+the tested plugin wheel, the upstream vLLM 0.30.0 Linux x86-64 wheel, and its required
+`humming-kernels==0.1.12` x86-64 wheel in `dist/`. The build verifies their hashes
+and installs these exact files without downloading or changing the base image's
+other dependencies. Supply the plugin wheel's
 SHA-256 and the source commit:
 
 ```bash
