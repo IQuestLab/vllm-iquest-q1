@@ -1,0 +1,66 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: pypi-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.repository == 'IQuestLab/vllm-iquest-q1' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/vllm-iquest-q1/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download the tested release wheel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.whl' --dir dist
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern SHA256SUMS --dir dist
+
+      - name: Verify the release artifact
+        working-directory: dist
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          sha256sum --check --strict SHA256SUMS
+          python - <<'PY'
+          import os
+          from email.parser import BytesParser
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = list(Path(".").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit("Expected exactly one release wheel")
+          with ZipFile(wheels[0]) as wheel:
+              metadata_files = [
+                  name for name in wheel.namelist()
+                  if name.endswith(".dist-info/METADATA")
+              ]
+              if len(metadata_files) != 1:
+                  raise SystemExit("Expected exactly one package metadata file")
+              metadata = BytesParser().parsebytes(wheel.read(metadata_files[0]))
+          if metadata["Name"] != "vllm-iquest-q1":
+              raise SystemExit("The wheel has an unexpected package name")
+          if os.environ["RELEASE_TAG"] != "v" + metadata["Version"]:
+              raise SystemExit("The release tag does not match the wheel version")
+          PY
+          rm SHA256SUMS
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
