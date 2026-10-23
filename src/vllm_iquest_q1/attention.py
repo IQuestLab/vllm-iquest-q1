@@ -43,6 +43,7 @@ def _apply_sink_key_kernel(
     HEAD_SIZE: tl.constexpr,
     SCALE: tl.constexpr,
     QUANTIZED_QUERY: tl.constexpr,
+    QUERY_SCALE_STRIDE: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
@@ -60,7 +61,8 @@ def _apply_sink_key_kernel(
         0.0,
     ).to(tl.float32)
     if QUANTIZED_QUERY:
-        q = q * tl.load(query_scale)
+        q_scale = tl.load(query_scale + (heads // QUERIES_PER_KV) * QUERY_SCALE_STRIDE)
+        q = q * q_scale[:, None]
     sink = tl.load(
         sink_key
         + (heads[:, None] // QUERIES_PER_KV) * sink_stride_h
@@ -123,6 +125,9 @@ def apply_sink_key(
         HEAD_SIZE=head_size,
         SCALE=scale,
         QUANTIZED_QUERY=query_scale is not None,
+        QUERY_SCALE_STRIDE=0
+        if query_scale is None or query_scale.numel() == 1
+        else query_scale.stride(-1),
         BLOCK_ROWS=4,
         BLOCK_D=triton.next_power_of_2(head_size),
         num_warps=4,
