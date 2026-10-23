@@ -24,10 +24,10 @@ except ImportError:
 @pytest.mark.parametrize("num_tokens", [0, 1, 17, 1024])
 @pytest.mark.parametrize("output_dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("strided", [False, True])
-@pytest.mark.parametrize("quantized_query", [False, True])
+@pytest.mark.parametrize("query_scaling", ["none", "tensor", "head"])
 @torch.inference_mode()
 def test_sink_preserves_fp32_eager_rounding(
-    num_tokens, output_dtype, strided, quantized_query
+    num_tokens, output_dtype, strided, query_scaling
 ):
     """The sink correction must preserve rounding and leave padded rows untouched."""
     from vllm_iquest_q1.attention import apply_sink_key
@@ -39,9 +39,14 @@ def test_sink_preserves_fp32_eager_rounding(
         num_tokens + 3, storage_heads, head_size, device="cuda", dtype=torch.bfloat16
     )
     query_scale = None
-    if quantized_query:
+    if query_scaling != "none":
         query = query.to(current_platform.fp8_dtype())
-        query_scale = torch.tensor(0.5, device="cuda")
+        if query_scaling == "head":
+            query_scale = torch.tensor([0.25, -1, 0.5, -1], device="cuda")[::2]
+            if not strided:
+                query_scale = query_scale.contiguous()
+        else:
+            query_scale = torch.tensor(0.5, device="cuda")
     query = query[1:, :num_heads]
     sink = torch.randn(num_kv_heads, head_size, device="cuda", dtype=torch.bfloat16)
     output = torch.randn(
@@ -52,7 +57,10 @@ def test_sink_preserves_fp32_eager_rounding(
     scale = head_size**-0.5
     reference_query = query[:num_tokens].float()
     if query_scale is not None:
-        reference_query = reference_query * query_scale
+        scales = query_scale.expand(num_kv_heads).repeat_interleave(
+            num_heads // num_kv_heads
+        )
+        reference_query = reference_query * scales[None, :, None]
     dot = (reference_query * repeated_sink.float()).sum(-1) * scale
     lse = (dot + torch.randn_like(dot)).T
     if not strided:
@@ -73,7 +81,16 @@ def test_sink_preserves_fp32_eager_rounding(
 @pytest.mark.parametrize("sliding_window", [None, 17])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("query_lens", [[1, 3, 19], [1, 1, 1]])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
+@pytest.mark.parametrize(
+    "kv_cache_dtype,per_head_scales",
+    [
+        ("auto", False),
+        ("fp8", False),
+        ("fp8_e4m3", False),
+        ("fp8", True),
+        ("fp8_e4m3", True),
+    ],
+)
 @torch.inference_mode()
 def test_iquest_paged_learned_sink_matches_dense_attention(
     fa_version: int,
@@ -83,6 +100,7 @@ def test_iquest_paged_learned_sink_matches_dense_attention(
     dtype: torch.dtype,
     query_lens: list[int],
     kv_cache_dtype: str,
+    per_head_scales: bool,
 ) -> None:
     """The sink respects SWA, KV-head sharing, and non-unit FP8 Q/K/V scales."""
     if not is_fa_version_supported(fa_version):
@@ -167,21 +185,33 @@ def test_iquest_paged_learned_sink_matches_dense_attention(
         layer._q_scale = torch.tensor(0.5, device=device)
         layer._k_scale = torch.tensor(0.25, device=device)
         layer._v_scale = torch.tensor(2.0, device=device)
+        if per_head_scales:
+            layer._q_scale = torch.linspace(0.25, 0.5, num_kv_heads, device=device)
+            layer._k_scale = torch.linspace(0.125, 0.25, num_kv_heads, device=device)
+            layer._v_scale = torch.linspace(1.0, 2.0, num_kv_heads, device=device)
+        q_scale = layer._q_scale.expand(num_kv_heads).repeat_interleave(
+            num_q_heads // num_kv_heads
+        )[None, :, None]
+        k_scale = layer._k_scale.expand(num_kv_heads)[:, None, None]
+        v_scale = layer._v_scale.expand(num_kv_heads)[:, None, None]
         fp8_dtype = current_platform.fp8_dtype()
         # Build the dense reference independently of the cache-write kernel.
-        reference_query = (reference_query / layer._q_scale).to(
-            fp8_dtype
-        ).float() * layer._q_scale
+        reference_query = (reference_query / q_scale).to(fp8_dtype).float() * q_scale
         reference_key, reference_value = reference_cache.chunk(2, dim=-1)
         reference_cache = torch.cat(
             [
-                (reference_key / layer._k_scale).to(fp8_dtype).float() * layer._k_scale,
-                (reference_value / layer._v_scale).to(fp8_dtype).float()
-                * layer._v_scale,
+                (reference_key / k_scale).to(fp8_dtype).float() * k_scale,
+                (reference_value / v_scale).to(fp8_dtype).float() * v_scale,
             ],
             dim=-1,
         )
-        query, _ = ops.scaled_fp8_quant(query.flatten(1).contiguous(), layer._q_scale)
+        query, _ = ops.scaled_fp8_quant(
+            query.flatten(1).contiguous(),
+            layer._q_scale,
+            group_shape=(-1, num_q_heads * head_size // num_kv_heads)
+            if per_head_scales
+            else (-1, -1),
+        )
         query = query.reshape(-1, num_q_heads, head_size)
         key, value = (
             kv_cache.transpose(1, 2)
@@ -199,9 +229,7 @@ def test_iquest_paged_learned_sink_matches_dense_attention(
         )
         cached_key, cached_value = kv_cache.view(fp8_dtype).float().chunk(2, dim=-1)
         torch.testing.assert_close(
-            torch.cat(
-                [cached_key * layer._k_scale, cached_value * layer._v_scale], dim=-1
-            ),
+            torch.cat([cached_key * k_scale, cached_value * v_scale], dim=-1),
             reference_cache,
             atol=0,
             rtol=0,

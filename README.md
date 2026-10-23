@@ -57,6 +57,7 @@ vLLM, such as Hopper with FlashAttention 3 and the default BF16 model dtype.
 Add `--calculate-kv-scales` when
 the checkpoint does not provide calibrated scales. The learned sink key stays
 in the model dtype, and its attention score uses the dequantized query.
+Both per-tensor and per-KV-head quantization scales are supported.
 
 ## Development
 
