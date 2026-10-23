@@ -57,7 +57,7 @@ def _apply_sink_key_kernel(
         + heads[:, None] * query_stride_h
         + dims[None, :] * query_stride_d,
         valid,
-        0,
+        0.0,
     ).to(tl.float32)
     if QUANTIZED_QUERY:
         q = q * tl.load(query_scale)
