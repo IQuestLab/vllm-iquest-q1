@@ -5,13 +5,16 @@
 from typing import Any, ClassVar
 
 import torch
-
 from vllm.config import get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.attention import Attention
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
+from vllm.utils.torch_utils import (
+    canonicalize_singleton_dim_strides,
+    is_quantized_kv_cache,
+)
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends import flash_attn as fa
 from vllm.v1.attention.backends.fa_utils import FA4_HD256_PAGE_SIZE
@@ -21,6 +24,7 @@ from vllm.v1.attention.backends.fa_utils import FA4_HD256_PAGE_SIZE
 def _apply_sink_key_kernel(
     query,
     sink_key,
+    query_scale,
     output,
     lse,
     num_tokens,
@@ -38,6 +42,8 @@ def _apply_sink_key_kernel(
     QUERIES_PER_KV: tl.constexpr,
     HEAD_SIZE: tl.constexpr,
     SCALE: tl.constexpr,
+    QUANTIZED_QUERY: tl.constexpr,
+    QUERY_SCALE_STRIDE: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
@@ -52,8 +58,11 @@ def _apply_sink_key_kernel(
         + heads[:, None] * query_stride_h
         + dims[None, :] * query_stride_d,
         valid,
-        0,
+        0.0,
     ).to(tl.float32)
+    if QUANTIZED_QUERY:
+        q_scale = tl.load(query_scale + (heads // QUERIES_PER_KV) * QUERY_SCALE_STRIDE)
+        q = q * q_scale[:, None]
     sink = tl.load(
         sink_key
         + (heads[:, None] // QUERIES_PER_KV) * sink_stride_h
@@ -94,14 +103,16 @@ def apply_sink_key(
     lse: torch.Tensor,
     scale: float,
     num_tokens: int,
+    query_scale: torch.Tensor | None = None,
 ) -> None:
-    """Include an always-visible zero-valued sink in paged attention output."""
+    """Include a learned sink, dequantizing FP8 queries before their key dot product."""
     if num_tokens == 0:
         return
     num_heads, head_size = query.shape[1:]
     _apply_sink_key_kernel[(cdiv(num_tokens * num_heads, 4),)](
         query,
         sink_key,
+        query_scale,
         output,
         lse,
         num_tokens,
@@ -113,6 +124,10 @@ def apply_sink_key(
         QUERIES_PER_KV=num_heads // sink_key.shape[0],
         HEAD_SIZE=head_size,
         SCALE=scale,
+        QUANTIZED_QUERY=query_scale is not None,
+        QUERY_SCALE_STRIDE=0
+        if query_scale is None or query_scale.numel() == 1
+        else query_scale.stride(-1),
         BLOCK_ROWS=4,
         BLOCK_D=triton.next_power_of_2(head_size),
         num_warps=4,
@@ -135,6 +150,8 @@ class IQuestFlashAttentionBackend(fa.FlashAttentionBackend):
         "auto",
         "float16",
         "bfloat16",
+        "fp8",
+        "fp8_e4m3",
     ]
 
     @staticmethod
@@ -152,9 +169,12 @@ class IQuestFlashAttentionImpl(fa.FlashAttentionImpl):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        if self.kv_cache_dtype not in ("auto", "float16", "bfloat16"):
+        if (
+            self.kv_cache_dtype
+            not in IQuestFlashAttentionBackend.supported_kv_cache_dtypes
+        ):
             raise NotImplementedError(
-                "iQuest learned sinks require unquantized KV cache"
+                f"iQuest learned sinks do not support {self.kv_cache_dtype} KV cache"
             )
         if self.attn_type != AttentionType.DECODER:
             raise NotImplementedError("iQuest learned sinks require decoder attention")
@@ -174,7 +194,6 @@ class IQuestFlashAttentionImpl(fa.FlashAttentionImpl):
                 raise NotImplementedError(
                     "iQuest learned sinks do not support context parallelism"
                 )
-        self.supports_quant_query_input = False
 
     def forward(
         self,
@@ -209,6 +228,22 @@ class IQuestFlashAttentionImpl(fa.FlashAttentionImpl):
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
+        query_scale = None
+        q_descale = k_descale = v_descale = None
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
+            descale_shape = (
+                attn_metadata.query_start_loc.shape[0] - 1,
+                self.num_kv_heads,
+            )
+            if self.supports_quant_query_input:
+                # Attention quantizes Q before forward; the learned key stays
+                # in the model dtype, so its dot product needs dequantized Q.
+                query_scale = layer._q_scale
+                q_descale = query_scale.expand(descale_shape)
+            k_descale = layer._k_scale.expand(descale_shape)
+            v_descale = layer._v_scale.expand(descale_shape)
         max_seq_len = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
         num_splits = attn_metadata.max_num_splits
@@ -234,9 +269,14 @@ class IQuestFlashAttentionImpl(fa.FlashAttentionImpl):
             scheduler_metadata=attn_metadata.scheduler_metadata,
             fa_version=self.vllm_flash_attn_version,
             num_splits=num_splits,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
             return_softmax_lse=True,
         )
-        apply_sink_key(query, layer.sink_key, output, lse, self.scale, num_tokens)
+        apply_sink_key(
+            query, layer.sink_key, output, lse, self.scale, num_tokens, query_scale
+        )
         return output
 
 
