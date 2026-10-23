@@ -63,6 +63,7 @@ def test_sink_preserves_fp32_eager_rounding(num_tokens, output_dtype, strided):
 @pytest.mark.parametrize("sliding_window", [None, 17])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("query_lens", [[1, 3, 19], [1, 1, 1]])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 @torch.inference_mode()
 def test_iquest_paged_learned_sink_matches_dense_attention(
     fa_version: int,
@@ -71,10 +72,17 @@ def test_iquest_paged_learned_sink_matches_dense_attention(
     sliding_window: int | None,
     dtype: torch.dtype,
     query_lens: list[int],
+    kv_cache_dtype: str,
 ) -> None:
-    """A learned key remains visible outside SWA and respects KV-head sharing."""
+    """The sink respects SWA, KV-head sharing, and non-unit FP8 Q/K/V scales."""
     if not is_fa_version_supported(fa_version):
         pytest.skip(f"FlashAttention {fa_version} is unavailable")
+    quantized = kv_cache_dtype != "auto"
+    if quantized and not (
+        fa_version == 3 and current_platform.is_device_capability_family(90)
+        or fa_version == 4 and current_platform.is_device_capability_family(100)
+    ):
+        pytest.skip("FP8 KV cache requires FA3 on SM90 or FA4 on SM100")
     if (
         fa_version == 4
         and current_platform.is_device_capability(90)
@@ -84,8 +92,12 @@ def test_iquest_paged_learned_sink_matches_dense_attention(
 
     from types import SimpleNamespace
 
-    from vllm_iquest_q1.attention import IQuestFlashAttentionImpl
+    from vllm_iquest_q1.attention import (
+        IQuestFlashAttentionBackend,
+        IQuestFlashAttentionImpl,
+    )
 
+    from vllm import _custom_ops as ops
     from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 
     set_random_seed(0)
@@ -121,10 +133,48 @@ def test_iquest_paged_learned_sink_matches_dense_attention(
         suffix_kv_lens=None,
     )
     impl = IQuestFlashAttentionImpl(
-        num_q_heads, head_size, scale, num_kv_heads, None, sliding_window, "auto"
+        num_q_heads, head_size, scale, num_kv_heads, None, sliding_window, kv_cache_dtype
     )
     impl.vllm_flash_attn_version = fa_version
     impl.fa4_hd256 = False
+    layer = SimpleNamespace(sink_key=sink_key)
+    reference_query = query.float()
+    reference_cache = kv_cache.float()
+    if quantized:
+        assert IQuestFlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)
+        layer._q_scale = torch.tensor(0.5, device=device)
+        layer._k_scale = torch.tensor(0.25, device=device)
+        layer._v_scale = torch.tensor(2.0, device=device)
+        fp8_dtype = current_platform.fp8_dtype()
+        # Build the dense reference independently of the cache-write kernel.
+        reference_query = (
+            (reference_query / layer._q_scale).to(fp8_dtype).float() * layer._q_scale
+        )
+        reference_key, reference_value = reference_cache.chunk(2, dim=-1)
+        reference_cache = torch.cat(
+            [
+                (reference_key / layer._k_scale).to(fp8_dtype).float() * layer._k_scale,
+                (reference_value / layer._v_scale).to(fp8_dtype).float() * layer._v_scale,
+            ],
+            dim=-1,
+        )
+        query, _ = ops.scaled_fp8_quant(
+            query.flatten(1).contiguous(), layer._q_scale
+        )
+        query = query.reshape(-1, num_q_heads, head_size)
+        key, value = (
+            kv_cache.transpose(1, 2)
+            .reshape(-1, num_kv_heads, 2 * head_size)
+            .chunk(2, dim=-1)
+        )
+        kv_cache = torch.empty_like(kv_cache, dtype=torch.uint8)
+        impl.do_kv_cache_update(
+            layer,
+            key,
+            value,
+            kv_cache,
+            torch.arange(9 * block_size, device=device, dtype=torch.int64),
+        )
     output = torch.full(
         (num_tokens + 5, num_q_heads + 1, head_size),
         -73,
@@ -132,7 +182,7 @@ def test_iquest_paged_learned_sink_matches_dense_attention(
         device=device,
     )[:, :num_q_heads]
     impl.forward(
-        SimpleNamespace(sink_key=sink_key),
+        layer,
         query,
         None,
         None,
@@ -146,12 +196,12 @@ def test_iquest_paged_learned_sink_matches_dense_attention(
     start = 0
     for seq, (query_len, kv_len) in enumerate(zip(query_lens, kv_lens)):
         cache = (
-            kv_cache[block_table[seq]]
+            reference_cache[block_table[seq]]
             .transpose(1, 2)
             .reshape(-1, num_kv_heads, 2 * head_size)[:kv_len]
         )
         key, value = cache.float().repeat_interleave(repeat, dim=1).chunk(2, dim=-1)
-        q = query[start : start + query_len].float()
+        q = reference_query[start : start + query_len]
         logits = torch.einsum("qhd,khd->hqk", q, key) * scale
         query_pos = torch.arange(kv_len - query_len, kv_len, device=device)
         key_pos = torch.arange(kv_len, device=device)

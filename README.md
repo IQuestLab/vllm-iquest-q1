@@ -51,6 +51,12 @@ vllm serve "$MODEL_ROOT" \
   }'
 ```
 
+For an FP8 KV cache, add `--kv-cache-dtype fp8` (or `fp8_e4m3`). This
+requires a device and FlashAttention version that support FP8 KV caching in
+vLLM, such as Hopper with FlashAttention 3. Add `--calculate-kv-scales` when
+the checkpoint does not provide calibrated scales. The learned sink key stays
+in the model dtype, and its attention score uses the dequantized query.
+
 ## Development
 
 ```bash
